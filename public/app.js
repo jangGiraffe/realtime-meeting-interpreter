@@ -101,7 +101,8 @@ function saveCtx() {
 function loadCtx() {
   try { const c = JSON.parse(load('meetingCtx') || '{}'); for (const [k, id] of Object.entries(CTX_FIELDS)) if (c[k]) $(id).value = c[k]; } catch {}
   try { const o = JSON.parse(load('opts') || '{}'); if (o.refine === false) $('optRefine').checked = false; if (o.noise && o.v === 2) $('optNoise').value = o.noise; if (o.src) $('srcSelect').value = o.src; if (o.muteShared === false) $('optMuteShared').checked = false; S.savedMic = o.mic; } catch {}
-  els.mic.disabled = $('srcSelect').value === 'tab';
+  updateSpeakerBtn();
+  els.mic.disabled = $('srcSelect').value === 'tab' || $('srcSelect').value === 'file';
   $('meetingTitle').textContent = getCtx().title || '실시간 회의 통역';
 }
 // 음성 인식 힌트: 회의 제목, 참석자 이름, 용어집 원어 (고유명사 오인식 방지. 예: J PASS → JPEG)
@@ -388,25 +389,103 @@ async function openDisplayAudio() {
   }
   at.onended = () => { if (!S.userStopped) { toast('회의 소리 공유가 끝났습니다. 다시 시작하세요.', true, 8000); els.btnStop.click(); } };
   S.dispStream = disp;
+  // 전체 화면 공유(System Audio)는 노트북 소리 켜기/끄기를 공유 시작 때만 정할 수 있다 (Chrome 제약)
+  S.dispSystem = /^loopback/.test(at.getSettings().deviceId || '');
   dlog(`회의 소리 공유: ${at.label} / ${JSON.stringify(at.getSettings())}`);
+}
+// ===== 녹음 파일 재생하며 통역 =====
+// 오디오 요소는 한 번만 AudioContext에 연결할 수 있으므로 파일용 컨텍스트는 파일을 바꿀 때까지 유지한다
+const FileSrc = { file: null, url: '', ctx: null, dest: null };
+function fileMode() { return $('srcSelect').value === 'file'; }
+function updateFileUi() {
+  const on = fileMode();
+  $('btnPickFile').classList.toggle('hidden', !on);
+  $('fileBar').classList.toggle('hidden', !on || !FileSrc.file);
+  els.mic.disabled = $('srcSelect').value === 'tab' || on;
+}
+function setAudioFile(file) {
+  if (!file) return;
+  const el = $('fileAudio');
+  el.pause();
+  if (FileSrc.url) URL.revokeObjectURL(FileSrc.url);
+  if (FileSrc.ctx) { FileSrc.ctx.close().catch(() => {}); FileSrc.ctx = null; FileSrc.dest = null; }
+  // 요소를 새로 만들어야 다른 컨텍스트에 다시 연결할 수 있다
+  const fresh = el.cloneNode(false); el.replaceWith(fresh);
+  FileSrc.file = file; FileSrc.url = URL.createObjectURL(file);
+  fresh.src = FileSrc.url;
+  fresh.onended = () => { if (S.state === 'live' && fileMode()) { toast('녹음 파일 재생이 끝나 통역을 종료합니다.', false, 6000); els.btnStop.click(); } };
+  $('fileName').textContent = file.name; $('fileName').title = file.name;
+  updateFileUi();
+  toast(`녹음 파일: ${file.name} — 통역 시작을 누르면 재생과 함께 통역합니다.`, false, 6000);
+}
+$('btnPickFile').onclick = () => $('audioFile').click();
+$('audioFile').onchange = () => { setAudioFile($('audioFile').files[0]); $('audioFile').value = ''; };
+async function openFileAudio() {
+  if (!FileSrc.file) throw new Error('녹음 파일을 먼저 고르세요 (파일 선택 버튼).');
+  const el = $('fileAudio');
+  if (!FileSrc.ctx) {
+    FileSrc.ctx = new AudioContext();
+    const srcNode = FileSrc.ctx.createMediaElementSource(el);
+    FileSrc.dest = FileSrc.ctx.createMediaStreamDestination();
+    srcNode.connect(FileSrc.dest);
+    srcNode.connect(FileSrc.ctx.destination); // 스피커로도 들려준다
+  }
+  await FileSrc.ctx.resume();
+  S.analyser = FileSrc.ctx.createAnalyser(); S.analyser.fftSize = 512;
+  FileSrc.ctx.createMediaStreamSource(FileSrc.dest.stream).connect(S.analyser);
+  S.sendTrack = FileSrc.dest.stream.getAudioTracks()[0];
+  dlog('녹음 파일 통역: ' + FileSrc.file.name + ' @' + el.currentTime.toFixed(1) + 's');
 }
 async function openAudio() {
   const mode = $('srcSelect').value;
+  if (mode === 'file') return openFileAudio();
   if (mode !== 'mic') await openDisplayAudio();
   if (mode !== 'tab') await openMic(mode === 'mix');
   S.audioCtx = new AudioContext();
   const dest = S.audioCtx.createMediaStreamDestination();
-  if (S.dispStream) S.audioCtx.createMediaStreamSource(new MediaStream(S.dispStream.getAudioTracks())).connect(dest);
+  S.mixDest = dest;
+  if (S.dispStream) attachDispAudio();
   if (S.stream) S.audioCtx.createMediaStreamSource(S.stream).connect(dest);
   S.analyser = S.audioCtx.createAnalyser(); S.analyser.fftSize = 512;
   S.audioCtx.createMediaStreamSource(dest.stream).connect(S.analyser);
   // 마이크만 쓸 때는 원본 트랙을 그대로 보낸다 (불필요한 재샘플링 방지)
   S.sendTrack = mode === 'mic' ? S.stream.getAudioTracks()[0] : dest.stream.getAudioTracks()[0];
 }
+// 공유한 회의 소리를 송신 믹스에 연결한다. 송신 트랙(mixDest)은 그대로라 공유를 바꿔도 통역 연결은 유지된다.
+function attachDispAudio() {
+  S.dispSrc = S.audioCtx.createMediaStreamSource(new MediaStream(S.dispStream.getAudioTracks()));
+  S.dispSrc.connect(S.mixDest);
+  // 탭 공유를 노트북 소리 끔으로 시작했으면, 탭 소리를 여기서 직접 재생해 공유 중에도 켜고 끌 수 있게 한다
+  if (!S.dispSystem && S.dispStream.getAudioTracks()[0].getSettings().suppressLocalAudioPlayback) {
+    S.monitorGain = S.audioCtx.createGain();
+    S.monitorGain.gain.value = $('optMuteShared').checked ? 0 : 1;
+    S.dispSrc.connect(S.monitorGain).connect(S.audioCtx.destination);
+  }
+}
+// 공유 중 노트북 소리 설정을 바꿀 수 없는 경우 (전체 화면 공유 등): 바뀐 설정으로 공유를 다시 받아 소리 입력만 갈아 끼운다
+async function reshareDisplay(muted) {
+  const old = S.dispStream;
+  $('optMuteShared').checked = muted;
+  try { await openDisplayAudio(); }
+  catch (e) {
+    $('optMuteShared').checked = !muted;
+    dlog('공유 다시 받기 실패: ' + e.name + ' ' + e.message);
+    toast('공유를 다시 받지 못해 노트북 소리 설정을 그대로 둡니다. (통역은 계속됩니다)', true, 6000);
+    return;
+  }
+  old.getAudioTracks().forEach(t => { t.onended = null; }); old.getTracks().forEach(t => t.stop());
+  if (S.dispSrc) S.dispSrc.disconnect();
+  if (S.monitorGain) S.monitorGain.disconnect();
+  S.monitorGain = null;
+  attachDispAudio();
+  saveCtx(); updateSpeakerBtn();
+  toast(muted ? '노트북 소리 꺼짐 (통역에만 씀)' : '노트북 소리 켜짐');
+}
 function closeAudio() {
+  if (FileSrc.file) { try { $('fileAudio').pause(); } catch {} }
   if (S.stream) S.stream.getTracks().forEach(t => t.stop());
   if (S.dispStream) { S.dispStream.getAudioTracks().forEach(t => { t.onended = null; }); S.dispStream.getTracks().forEach(t => t.stop()); }
-  S.stream = null; S.dispStream = null; S.sendTrack = null; S.analyser = null;
+  S.stream = null; S.dispStream = null; S.sendTrack = null; S.analyser = null; S.monitorGain = null; S.dispSystem = false; S.dispSrc = null; S.mixDest = null;
   if (S.audioCtx) { S.audioCtx.close().catch(() => {}); S.audioCtx = null; }
 }
 navigator.mediaDevices && navigator.mediaDevices.addEventListener && navigator.mediaDevices.addEventListener('devicechange', listMics);
@@ -416,7 +495,8 @@ els.mic.onchange = async () => {
 };
 $('srcSelect').onchange = () => {
   saveCtx();
-  els.mic.disabled = $('srcSelect').value === 'tab';
+  updateFileUi();
+  if (fileMode() && !FileSrc.file) $('audioFile').click();
   if (S.state === 'live') toast('소리 입력 방식은 일시정지 후 다시 시작하면 적용됩니다');
 };
 
@@ -447,6 +527,7 @@ async function connect() {
       dlog('데이터채널 열림');
       if (S.pc !== pc) return;
       S.state = 'live'; S.reconnectTries = 0;
+      if (fileMode() && FileSrc.file) $('fileAudio').play().catch(e => toast('녹음 파일을 재생하지 못했습니다: ' + e.message, true));
       S.lastInAt = performance.now(); S.outSinceIn = 0;
       setStatus('ok', '통역 중'); updateButtons();
     };
@@ -552,6 +633,7 @@ function updateButtons() {
   els.btnStop.disabled = st === 'idle';
 }
 els.btnStart.onclick = async () => {
+  if (fileMode() && !FileSrc.file) { $('audioFile').click(); toast('통역할 녹음 파일을 고르세요.'); return; }
   saveCtx();
   const st = await api('/api/status').catch(() => null);
   if (!st) { toast('로컬 서버에 연결할 수 없습니다. start.bat 창이 켜져 있는지 확인하세요.', true, 7000); return; }
@@ -570,7 +652,7 @@ els.btnStart.onclick = async () => {
 els.btnPause.onclick = async () => {
   S.state = 'paused'; finalizeSeg();
   await disconnect(); closeAudio();
-  const ko = startKoRec();
+  const ko = fileMode() ? false : startKoRec();
   setStatus('paused', ko ? '일시정지 · 한국어만 기록 중 (무료)' : '일시정지 (과금 안 됨)'); updateButtons();
 };
 els.btnStop.onclick = async () => {
@@ -617,7 +699,29 @@ $('btnInfo').onclick = () => $('infoModal').classList.remove('hidden');
 $('btnInfoClose').onclick = () => { saveCtx(); $('infoModal').classList.add('hidden'); toast('회의 정보 저장됨'); };
 $('infoModal').addEventListener('mousedown', e => { if (e.target.id === 'infoModal') { saveCtx(); $('infoModal').classList.add('hidden'); } });
 Object.values(CTX_FIELDS).forEach(id => $(id).addEventListener('change', saveCtx));
-$('optRefine').onchange = saveCtx; $('optNoise').onchange = saveCtx; $('optMuteShared').onchange = saveCtx;
+$('optRefine').onchange = saveCtx; $('optNoise').onchange = saveCtx;
+// ===== 노트북 스피커 켜기/끄기 (공유한 회의 소리) =====
+function updateSpeakerBtn() {
+  const muted = $('optMuteShared').checked;
+  const b = $('btnSpeaker');
+  b.textContent = muted ? '🔇' : '🔊';
+  b.classList.toggle('muted', muted);
+  b.title = muted ? '노트북 소리 꺼짐 · 공유한 회의 소리를 통역에만 씁니다 (클릭하면 켜짐)' : '노트북 소리 켜짐 · 공유한 회의 소리를 스피커로도 냅니다 (클릭하면 꺼짐)';
+  b.setAttribute('aria-label', muted ? '노트북 소리 켜기' : '노트북 소리 끄기');
+}
+$('btnSpeaker').onclick = () => {
+  const muted = !$('optMuteShared').checked;
+  // 공유 중인데 직접 재생 경로가 없으면 (전체 화면 공유, 또는 소리 켬으로 시작한 탭 공유) Chrome이 설정 변경을 막으므로 공유를 다시 받는다
+  if (S.dispStream && S.mixDest && !S.monitorGain) {
+    dlog(`스피커 전환: ${S.dispSystem ? '전체 화면(System Audio)' : '탭(소리 켬으로 시작)'} 공유 다시 받기`);
+    toast('공유 창이 다시 뜹니다. 같은 화면(또는 탭)을 고르고 오디오 공유를 켜세요.', false, 6000);
+    reshareDisplay(muted);
+    return;
+  }
+  $('optMuteShared').checked = muted; saveCtx(); updateSpeakerBtn();
+  if (S.monitorGain) S.monitorGain.gain.value = muted ? 0 : 1;
+  toast(muted ? '노트북 소리 꺼짐 (통역에만 씀)' : '노트북 소리 켜짐');
+};
 $('btnClearHistory').onclick = () => {
   if (!confirm('화면의 대화 기록을 모두 지울까요? (회의 정보는 유지)')) return;
   S.items = []; els.history.innerHTML = ''; store('items', '[]'); toast('대화 기록을 지웠습니다');
@@ -765,6 +869,7 @@ TEXT_PRICES['gpt-4.1'] = TEXT_PRICES['gpt-4.1'] || [2.0, 8.0];
 
 // ===== 시작 =====
 loadCtx();
+updateFileUi();
 restoreItems();
 listMics();
 api('/api/status').then(st => { S.textModel = st.textModel; if (!st.hasKey) showKeyModal(); }).catch(() => setStatus('bad', '서버 꺼짐'));

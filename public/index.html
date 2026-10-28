@@ -22,10 +22,16 @@
         <option value="tab">회의 소리 (탭·화면 공유)</option>
         <option value="mix">회의 소리 + 내 마이크</option>
         <option value="mic">마이크만</option>
+        <option value="file">녹음 파일 (재생하며 통역)</option>
       </select>
+      <button class="btn ghost hidden" id="btnPickFile" title="통역할 녹음 파일을 고릅니다">파일 선택</button>
+      <input type="file" id="audioFile" accept="audio/*,video/*,.m4a,.mp3,.wav,.webm,.mp4,.aac,.ogg" hidden>
       <select id="micSelect" title="마이크 선택"><option value="default">기본 마이크</option></select>
       <div class="meter" title="마이크 입력 레벨"><i id="meterBar"></i></div>
       <button class="btn primary" id="btnStart">통역 시작</button>
+      <!-- 공유한 회의 소리를 노트북 스피커로도 낼지 (끄면 회의실 스피커와 겹치거나 하울링이 생기지 않는다) -->
+      <button class="btn ghost speaker" id="btnSpeaker" type="button">🔊</button>
+      <input type="checkbox" id="optMuteShared" checked hidden>
       <button class="btn" id="btnPause" disabled>일시정지</button>
       <button class="btn danger" id="btnStop" disabled>종료</button>
       <button class="btn ghost" id="btnMinutes" title="지금까지의 통역 기록으로 회사 양식 회의록(.docx)을 만듭니다">회의록 만들기</button>
@@ -34,6 +40,11 @@
       <span class="status" id="status"><i class="dot"></i><b>대기</b></span>
       <span class="stat"><small>사용</small><b id="elapsed">00:00</b></span>
       <span class="stat" title="실시간 번역 + 텍스트 보정/답변 번역 예상 비용 (세금·환율 별도)"><small>예상 비용</small><b id="cost">$0.000</b><small id="costKrw">≈ 0원</small></span>
+    </div>
+    <div class="filebar hidden" id="fileBar">
+      <span class="fname" id="fileName">녹음 파일</span>
+      <audio id="fileAudio" controls preload="metadata"></audio>
+      <small>재생 위치·속도를 바꿀 수 있습니다. 재생되는 동안만 통역합니다.</small>
     </div>
   </header>
 
@@ -80,18 +91,17 @@
       <div id="fileList"></div>
     </div>
     <label>자료 브리핑 <small>업로드하면 이름·용어·숫자 위주로 자동 요약됩니다. 직접 고쳐도 됩니다.</small><textarea id="ctxMaterials" rows="6" placeholder="(자료를 올리면 자동으로 채워집니다)"></textarea></label>
-    <label>회의 제목<input id="ctxTitle" placeholder="예) 신규 솔루션 도입 미팅"></label>
+    <label>회의 제목<input id="ctxTitle" placeholder="예) Navitaire 운영 협의"></label>
     <div class="row2">
       <label>장소<input id="ctxPlace" placeholder="예) TFT 2회의실 / Teams"></label>
-      <label>작성자 (회의록)<input id="ctxAuthor" placeholder="예) 우리 회사 홍길동"></label>
+      <label>작성자 (회의록)<input id="ctxAuthor" placeholder="예) AK아이에스 장지혁"></label>
     </div>
     <label>회의 안건<textarea id="ctxAgenda" rows="3" placeholder="예) 1. 11월 배포 일정 2. 장애 대응 SLA"></textarea></label>
-    <label>배경 설명<textarea id="ctxBackground" rows="3" placeholder="예) 예약 시스템 신규 솔루션 관련 해외 벤더 회의"></textarea></label>
-    <label>참석자 이름<textarea id="ctxParticipants" rows="2" placeholder="예) John Smith (Vendor PM), Sarah Lee (QA), 홍길동 (우리 회사)"></textarea></label>
+    <label>배경 설명<textarea id="ctxBackground" rows="3" placeholder="예) 제주항공 예약 시스템 Argo CD 전환 관련 벤더 회의"></textarea></label>
+    <label>참석자 이름<textarea id="ctxParticipants" rows="2" placeholder="예) John Smith (Navitaire PM), Sarah Lee (QA), 장지혁 (AK IS)"></textarea></label>
     <label>전문용어·약어 <small>한 줄에 하나: 원어 = 번역/설명</small><textarea id="ctxGlossary" rows="4" placeholder="PNR = 예약번호&#10;cutover = 전환&#10;SLA = 서비스 수준 협약(SLA)"></textarea></label>
     <div class="row">
       <label class="inline"><input type="checkbox" id="optRefine" checked> 문장 종료 후 문맥 보정 (텍스트 모델 비용 소액 추가)</label>
-      <label class="inline" title="회의실에서 다른 사람이 켠 회의를 함께 볼 때: 내 노트북으로 같은 회의에 음소거로 참가해 그 탭을 공유하면, 노트북 스피커로는 소리를 내지 않고 통역에만 씁니다"><input type="checkbox" id="optMuteShared" checked> 공유한 탭 소리를 이 노트북에서 재생하지 않기 (회의실 스피커로 함께 들을 때)</label>
       <label class="inline">마이크 환경
         <select id="optNoise">
           <option value="far_field">회의실·스피커 소리를 마이크로 받음</option>

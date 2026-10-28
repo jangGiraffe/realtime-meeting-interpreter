@@ -35,6 +35,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .btn.primary:hover:not(:disabled) { background: var(--accent2); }
 .btn.danger { color: #ffb3ae; }
 .btn.ghost { background: transparent; }
+.btn.speaker { padding: 6px 10px; font-size: 17px; line-height: 1.2; }
+.btn.speaker.muted { color: #ffb3ae; border-color: #5a2a28; }
 select, input, textarea { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 select { max-width: 220px; }
 textarea { resize: vertical; }
@@ -122,3 +124,7 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 #keyState { font-weight: 600; }
 #keyState.ok { color: var(--ok); } #keyState.none { color: var(--bad); }
 .sheet a { color: #9fc0ff; }
+.filebar { flex-basis: 100%; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.filebar .fname { font-size: 13px; font-weight: 600; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filebar audio { height: 34px; flex: 1; min-width: 260px; max-width: 640px; }
+.filebar small { color: var(--muted); font-size: 12px; }
