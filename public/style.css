@@ -117,3 +117,8 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 @media (max-width: 600px) { .row2 { grid-template-columns: 1fr; } }
 #newModal label.inline { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; color: var(--text); font-size: 14px; line-height: 1.5; }
 #newModal label.inline input { margin-top: 3px; }
+.keyrow { display: flex; gap: 8px; margin-top: 5px; }
+.keyrow input { flex: 1; margin-top: 0 !important; font-family: ui-monospace, Consolas, monospace; }
+#keyState { font-weight: 600; }
+#keyState.ok { color: var(--ok); } #keyState.none { color: var(--bad); }
+.sheet a { color: #9fc0ff; }

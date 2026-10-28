@@ -686,9 +686,39 @@ $('btnNewOk').onclick = async () => {
     else toast('새 회의를 시작합니다.' + archived, false, 7000);
   } finally { btn.disabled = false; }
 };
-function showKeyModal() { $('keyModal').classList.remove('hidden'); $('keyInput').focus(); }
+// ===== 설정 (API 키 · 회사명) =====
+async function refreshSettings() {
+  try {
+    const st = await api('/api/status');
+    const ks = $('keyState');
+    ks.textContent = st.hasKey ? `사용 중: ${st.keyMasked}` : '아직 없음 — 키를 넣어야 통역할 수 있습니다';
+    ks.className = st.hasKey ? 'ok' : 'none';
+    $('companyInput').value = st.company || '';
+    $('btnKeyDelete').disabled = !st.hasKey;
+    return st;
+  } catch { $('keyState').textContent = '서버에 연결할 수 없습니다'; }
+}
+function showKeyModal() {
+  $('keyInput').value = ''; $('keyInput').type = 'password'; $('btnKeyShow').textContent = '보기';
+  $('keyModal').classList.remove('hidden'); refreshSettings(); setTimeout(() => $('keyInput').focus(), 50);
+}
+$('btnSettings').onclick = showKeyModal;
+$('btnKeyCancel').onclick = () => $('keyModal').classList.add('hidden');
+$('keyModal').addEventListener('mousedown', e => { if (e.target.id === 'keyModal') $('keyModal').classList.add('hidden'); });
+$('btnKeyShow').onclick = () => { const i = $('keyInput'); i.type = i.type === 'password' ? 'text' : 'password'; $('btnKeyShow').textContent = i.type === 'password' ? '보기' : '숨기기'; };
 $('btnKeySave').onclick = async () => {
-  try { await api('/api/key', { key: $('keyInput').value }); $('keyModal').classList.add('hidden'); toast('API 키 저장됨. 통역 시작을 누르세요.'); setStatus('', '대기'); }
+  const btn = $('btnKeySave'); btn.disabled = true; btn.textContent = $('keyInput').value.trim() ? '키 확인 중...' : '저장 중...';
+  try {
+    const r = await api('/api/settings', { key: $('keyInput').value, company: $('companyInput').value });
+    $('keyModal').classList.add('hidden');
+    toast(r.warn ? '저장했습니다. ' + r.warn : (r.hasKey ? '저장했습니다. 통역을 시작할 수 있습니다.' : '저장했습니다.'), !!r.warn, r.warn ? 9000 : 4000);
+    if (r.hasKey && S.state === 'idle') setStatus('', '대기');
+  } catch (e) { toast(e.message, true, 7000); }
+  finally { btn.disabled = false; btn.textContent = '저장'; }
+};
+$('btnKeyDelete').onclick = async () => {
+  if (!confirm('이 컴퓨터에 저장된 OpenAI API 키를 지울까요? 지우면 통역과 번역을 쓸 수 없습니다.')) return;
+  try { await api('/api/settings', { deleteKey: true }); await refreshSettings(); toast('API 키를 지웠습니다.'); setStatus('bad', 'API 키 없음'); }
   catch (e) { toast(e.message, true); }
 };
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKeySave').click(); });

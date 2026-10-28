@@ -17,6 +17,7 @@
     <div class="controls">
       <button class="btn ghost" id="btnNew" title="지금 기록을 보관하고 새 회의를 시작합니다">새 회의</button>
       <button class="btn ghost" id="btnInfo" title="회의 사전 정보">회의 정보</button>
+      <button class="btn ghost" id="btnSettings" title="API 키·회사명 설정">설정</button>
       <select id="srcSelect" title="통역할 소리를 어디서 받을지 고릅니다">
         <option value="tab">회의 소리 (탭·화면 공유)</option>
         <option value="mix">회의 소리 + 내 마이크</option>
@@ -120,13 +121,25 @@
   </div>
 </div>
 
-<!-- API 키 -->
+<!-- 설정: API 키 · 회사명 -->
 <div class="modal hidden" id="keyModal">
   <div class="sheet small">
-    <h2>OpenAI API 키 설정</h2>
-    <p class="hint">키는 이 컴퓨터의 프로그램 폴더 <code>.env</code> 파일에만 저장되고 브라우저로 전달되지 않습니다.</p>
-    <input id="keyInput" type="password" placeholder="sk-...">
-    <div class="actions"><span class="grow"></span><button class="btn primary" id="btnKeySave">저장</button></div>
+    <h2>설정</h2>
+    <p class="hint">여기서 저장한 값은 이 컴퓨터의 프로그램 폴더 <code>.env</code> 파일에만 저장되고, 키는 브라우저로 다시 전달되지 않습니다.</p>
+    <label>OpenAI API 키 <small id="keyState">확인 중...</small>
+      <div class="keyrow">
+        <input id="keyInput" type="password" placeholder="새 키를 붙여 넣으면 바뀝니다 (sk-...)" autocomplete="off" spellcheck="false">
+        <button class="btn ghost" id="btnKeyShow" type="button" title="입력한 키 보기">보기</button>
+      </div>
+    </label>
+    <p class="hint">키는 <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>에서 만들 수 있습니다. 저장할 때 OpenAI에 맞는 키인지 확인합니다.</p>
+    <label>회사명 <small>회의록 작성자 기본값과 회의록 작성에 씁니다 (선택)</small><input id="companyInput" placeholder="예) 우리 회사"></label>
+    <div class="actions">
+      <button class="btn ghost danger" id="btnKeyDelete" type="button">키 삭제</button>
+      <span class="grow"></span>
+      <button class="btn ghost" id="btnKeyCancel" type="button">닫기</button>
+      <button class="btn primary" id="btnKeySave" type="button">저장</button>
+    </div>
   </div>
 </div>
 
