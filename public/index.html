@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>실시간 회의 통역</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <!-- 상단 -->
+  <header class="top">
+    <div class="brand">
+      <span class="logo">EN→KO</span>
+      <span class="title" id="meetingTitle">실시간 회의 통역</span>
+    </div>
+    <div class="controls">
+      <button class="btn ghost" id="btnNew" title="지금 기록을 보관하고 새 회의를 시작합니다">새 회의</button>
+      <button class="btn ghost" id="btnInfo" title="회의 사전 정보">회의 정보</button>
+      <select id="srcSelect" title="통역할 소리를 어디서 받을지 고릅니다">
+        <option value="tab">회의 소리 (탭·화면 공유)</option>
+        <option value="mix">회의 소리 + 내 마이크</option>
+        <option value="mic">마이크만</option>
+      </select>
+      <select id="micSelect" title="마이크 선택"><option value="default">기본 마이크</option></select>
+      <div class="meter" title="마이크 입력 레벨"><i id="meterBar"></i></div>
+      <button class="btn primary" id="btnStart">통역 시작</button>
+      <button class="btn" id="btnPause" disabled>일시정지</button>
+      <button class="btn danger" id="btnStop" disabled>종료</button>
+      <button class="btn ghost" id="btnMinutes" title="지금까지의 통역 기록으로 회사 양식 회의록(.docx)을 만듭니다">회의록 만들기</button>
+    </div>
+    <div class="stats">
+      <span class="status" id="status"><i class="dot"></i><b>대기</b></span>
+      <span class="stat"><small>사용</small><b id="elapsed">00:00</b></span>
+      <span class="stat" title="실시간 번역 + 텍스트 보정/답변 번역 예상 비용 (세금·환율 별도)"><small>예상 비용</small><b id="cost">$0.000</b><small id="costKrw">≈ 0원</small></span>
+    </div>
+  </header>
+
+  <!-- 중앙: 자막 -->
+  <main class="feed" id="feed">
+    <div class="empty" id="empty">
+      <p><b>회의 정보</b>에 안건, 참석자, 용어를 입력한 뒤 마이크를 고르고 <b>통역 시작</b>을 누르세요.</p>
+      <p class="sub">화상회의 소리는 <b>회의 소리 (탭·화면 공유)</b>를 고르고, 공유 창에서 회의 탭이나 화면을 선택한 뒤 <b>오디오 공유</b>를 켜세요. 스피커 소리를 마이크로 받는 것보다 인식이 훨씬 정확합니다.</p>
+      <p class="sub">영어 발언은 회색 원문과 한국어 자막으로 나옵니다. <span class="badge interim">임시</span>는 빠른 실시간 번역이고, 문장이 끝나면 문맥을 반영해 <span class="badge final">확정</span>으로 바뀝니다. 한국어 발언은 번역하지 않고 문맥 참고용으로만 기록합니다.</p>
+    </div>
+    <div id="history"></div>
+    <div class="card live hidden" id="live">
+      <div class="meta"><span class="badge live">듣는 중</span></div>
+      <div class="src" id="liveSrc"></div>
+      <div class="tr" id="liveTr"></div>
+    </div>
+  </main>
+
+  <!-- 하단: 답변 번역 -->
+  <footer class="reply">
+    <div class="reply-in">
+      <label for="replyInput">내 답변 (한국어) · Enter 번역 · Shift+Enter 줄바꿈</label>
+      <textarea id="replyInput" rows="2" placeholder="예) 다음 주 화요일까지 일정 검토해서 회신드리겠습니다."></textarea>
+    </div>
+    <div class="reply-out">
+      <label>영어 번역</label>
+      <div class="out-row">
+        <div class="out" id="replyOut"><span class="ph">번역 결과가 여기에 표시됩니다.</span></div>
+        <button class="btn primary copy" id="btnCopy" disabled>복사</button>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<!-- 회의 정보 -->
+<div class="modal hidden" id="infoModal">
+  <div class="sheet">
+    <h2>회의 사전 정보</h2>
+    <p class="hint">입력한 내용은 이 컴퓨터 브라우저에만 저장되며, 자막 보정과 답변 번역 때 참고합니다.</p>
+    <div class="drop" id="drop">
+      <input type="file" id="fileInput" multiple accept=".docx,.xlsx,.xlsm,.pptx,.pdf,.txt,.md,.csv,.tsv,.json,.vtt,.srt" hidden>
+      <b>회의 자료 올리기</b> · 파일을 끌어다 놓거나 <a href="#" id="filePick">선택</a>
+      <div class="sub">Word(.docx) · Excel(.xlsx) · PowerPoint(.pptx) · PDF · 텍스트(.txt .md .csv)</div>
+      <div id="fileList"></div>
+    </div>
+    <label>자료 브리핑 <small>업로드하면 이름·용어·숫자 위주로 자동 요약됩니다. 직접 고쳐도 됩니다.</small><textarea id="ctxMaterials" rows="6" placeholder="(자료를 올리면 자동으로 채워집니다)"></textarea></label>
+    <label>회의 제목<input id="ctxTitle" placeholder="예) 신규 솔루션 도입 미팅"></label>
+    <div class="row2">
+      <label>장소<input id="ctxPlace" placeholder="예) TFT 2회의실 / Teams"></label>
+      <label>작성자 (회의록)<input id="ctxAuthor" placeholder="예) 우리 회사 홍길동"></label>
+    </div>
+    <label>회의 안건<textarea id="ctxAgenda" rows="3" placeholder="예) 1. 11월 배포 일정 2. 장애 대응 SLA"></textarea></label>
+    <label>배경 설명<textarea id="ctxBackground" rows="3" placeholder="예) 예약 시스템 신규 솔루션 관련 해외 벤더 회의"></textarea></label>
+    <label>참석자 이름<textarea id="ctxParticipants" rows="2" placeholder="예) John Smith (Vendor PM), Sarah Lee (QA), 홍길동 (우리 회사)"></textarea></label>
+    <label>전문용어·약어 <small>한 줄에 하나: 원어 = 번역/설명</small><textarea id="ctxGlossary" rows="4" placeholder="PNR = 예약번호&#10;cutover = 전환&#10;SLA = 서비스 수준 협약(SLA)"></textarea></label>
+    <div class="row">
+      <label class="inline"><input type="checkbox" id="optRefine" checked> 문장 종료 후 문맥 보정 (텍스트 모델 비용 소액 추가)</label>
+      <label class="inline" title="회의실에서 다른 사람이 켠 회의를 함께 볼 때: 내 노트북으로 같은 회의에 음소거로 참가해 그 탭을 공유하면, 노트북 스피커로는 소리를 내지 않고 통역에만 씁니다"><input type="checkbox" id="optMuteShared" checked> 공유한 탭 소리를 이 노트북에서 재생하지 않기 (회의실 스피커로 함께 들을 때)</label>
+      <label class="inline">마이크 환경
+        <select id="optNoise">
+          <option value="far_field">회의실·스피커 소리를 마이크로 받음</option>
+          <option value="near_field">헤드셋·개인 마이크 (입 가까이)</option>
+          <option value="none">노이즈 제거 끄기</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="btn ghost" id="btnClearHistory">대화 기록 지우기</button>
+      <button class="btn ghost" id="btnExport">기록 저장(.txt)</button>
+      <span class="grow"></span>
+      <button class="btn primary" id="btnInfoClose">저장하고 닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 새 회의 -->
+<div class="modal hidden" id="newModal">
+  <div class="sheet small">
+    <h2>새 회의 시작</h2>
+    <p class="hint" id="newSummary"></p>
+    <label class="inline"><input type="checkbox" id="newArchive" checked> 지금 기록을 보관하기 (프로그램 폴더의 <code>기록</code> 폴더에 .txt로 저장)</label>
+    <label class="inline"><input type="checkbox" id="newClearCtx" checked> 회의 정보 비우기 (제목·장소·안건·배경·참석자·자료 브리핑)</label>
+    <p class="hint" style="margin-top:10px">용어집과 작성자, 마이크·소리 설정은 그대로 둡니다. 사용 시간과 예상 비용도 0부터 다시 셉니다.</p>
+    <div class="actions"><span class="grow"></span><button class="btn ghost" id="btnNewCancel">취소</button><button class="btn primary" id="btnNewOk">새 회의 시작</button></div>
+  </div>
+</div>
+
+<!-- API 키 -->
+<div class="modal hidden" id="keyModal">
+  <div class="sheet small">
+    <h2>OpenAI API 키 설정</h2>
+    <p class="hint">키는 이 컴퓨터의 프로그램 폴더 <code>.env</code> 파일에만 저장되고 브라우저로 전달되지 않습니다.</p>
+    <input id="keyInput" type="password" placeholder="sk-...">
+    <div class="actions"><span class="grow"></span><button class="btn primary" id="btnKeySave">저장</button></div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
