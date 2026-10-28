@@ -472,7 +472,8 @@ async function openDisplayAudio() {
   const at = disp.getAudioTracks()[0];
   if (!at) {
     disp.getTracks().forEach(t => t.stop());
-    throw new Error('공유 창에서 "오디오 공유"를 켜지 않았습니다. 회의 탭(또는 전체 화면)을 고르고 오디오 공유를 체크하세요.');
+    // 창·전체 화면 공유는 Chrome이 오디오 스위치를 꺼둔 채로 보여주고, 웹에서 켤 방법이 없다 (Chrome 보안 화면)
+    throw new Error('소리가 공유되지 않았습니다. 통역 시작을 다시 누르고, 공유 창 맨 아래 "시스템 오디오도 공유합니다" 스위치를 켠 뒤 공유하세요. (Chrome 탭을 고르면 탭 오디오가 기본으로 켜져 있습니다)');
   }
   at.onended = () => { if (!S.userStopped) { toast('회의 소리 공유가 끝났습니다. 다시 시작하세요.', true, 8000); els.btnStop.click(); } };
   S.dispStream = disp;
