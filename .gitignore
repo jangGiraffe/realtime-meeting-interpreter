@@ -1,0 +1,8 @@
+# 비밀 정보 · 개인 기록 (절대 커밋하지 않음)
+.env
+debug.log
+회의록/
+기록/
+_backup*/
+node_modules/
+*.log
