@@ -313,21 +313,53 @@ async function archive(req, res) {
   send(res, 200, { ok: true, file });
 }
 
+// 6) 화면의 설정 메뉴: API 키·회사명을 .env에 저장 (파일을 직접 고칠 필요 없음)
+const maskKey = k => (k ? (k.length > 12 ? `${k.slice(0, 7)}…${k.slice(-4)}` : '설정됨') : '');
+function setEnv(name, value) {
+  let txt = ''; try { txt = fs.readFileSync(ENV_PATH, 'utf8').replace(/^\uFEFF/, ''); } catch {}
+  const line = `${name}=${value}`;
+  const re = new RegExp(`^${name}=.*$`, 'm');
+  txt = re.test(txt) ? txt.replace(re, line) : (txt && !txt.endsWith('\n') ? txt + '\n' : txt) + line + '\n';
+  fs.writeFileSync(ENV_PATH, txt, 'utf8');
+  ENV = loadEnv();
+}
+async function checkKey(key) { // OpenAI에 키가 맞는지 가볍게 확인 (모델 목록 조회, 과금 없음)
+  try {
+    const r = await fetch(`${OPENAI}/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(8000) });
+    if (r.status === 401) return { ok: false, error: '키가 올바르지 않습니다 (OpenAI가 거부함). 다시 복사해 붙여 넣어 주세요.' };
+    if (r.status === 429) return { ok: true, warn: '키는 맞지만 크레딧이나 사용 한도가 부족할 수 있습니다. 결제 설정을 확인하세요.' };
+    return r.ok ? { ok: true } : { ok: true, warn: `OpenAI 응답 ${r.status} — 키는 저장했습니다.` };
+  } catch (e) { return { ok: true, warn: '인터넷 연결 문제로 키를 확인하지 못했습니다. 키는 저장했습니다.' }; }
+}
+async function saveSettings(req, res) {
+  const body = JSON.parse(await readBody(req) || '{}');
+  const out = { ok: true };
+  if (body.deleteKey) { setEnv('OPENAI_API_KEY', ''); slog('API 키 삭제'); }
+  if (typeof body.key === 'string' && body.key.trim()) {
+    const key = body.key.trim().replace(/\s+/g, '');
+    if (!/^sk-[A-Za-z0-9_\-]{20,}$/.test(key)) return send(res, 400, { error: 'sk- 로 시작하는 OpenAI API 키를 그대로 붙여 넣어 주세요.' });
+    const c = await checkKey(key);
+    if (!c.ok) return send(res, 400, { error: c.error });
+    setEnv('OPENAI_API_KEY', key); slog('API 키 변경: ' + maskKey(key));
+    if (c.warn) out.warn = c.warn;
+  }
+  if (typeof body.company === 'string') setEnv('COMPANY_NAME', body.company.trim().replace(/[\r\n]/g, ''));
+  if (process.env.OPENAI_API_KEY) out.warn = (out.warn ? out.warn + ' ' : '') + '윈도우 환경 변수 OPENAI_API_KEY가 따로 있어 그 키가 우선 사용됩니다.';
+  out.keyMasked = maskKey(apiKey()); out.hasKey = !!apiKey();
+  send(res, 200, out);
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
   try {
     if (url.pathname === '/api/status' && req.method === 'GET') {
-      return send(res, 200, { hasKey: !!apiKey(), realtimeModel: REALTIME_MODEL(), textModel: TEXT_MODEL() });
+      const k = apiKey();
+      return send(res, 200, {
+        hasKey: !!k, keyMasked: maskKey(k), keyFromSystem: !!process.env.OPENAI_API_KEY,
+        company: cfg('COMPANY_NAME', ''), realtimeModel: REALTIME_MODEL(), textModel: TEXT_MODEL(),
+      });
     }
-    if (url.pathname === '/api/key' && req.method === 'POST') {
-      const { key } = JSON.parse(await readBody(req));
-      if (!key || !/^sk-/.test(key.trim())) return send(res, 400, { error: 'sk- 로 시작하는 키를 입력하세요' });
-      let txt = ''; try { txt = fs.readFileSync(ENV_PATH, 'utf8'); } catch {}
-      txt = /^OPENAI_API_KEY=.*$/m.test(txt) ? txt.replace(/^OPENAI_API_KEY=.*$/m, `OPENAI_API_KEY=${key.trim()}`) : `OPENAI_API_KEY=${key.trim()}\n${txt}`;
-      fs.writeFileSync(ENV_PATH, txt, 'utf8');
-      ENV = loadEnv();
-      return send(res, 200, { ok: true });
-    }
+    if ((url.pathname === '/api/key' || url.pathname === '/api/settings') && req.method === 'POST') return await saveSettings(req, res);
     if (url.pathname === '/api/extract' && req.method === 'POST') return await extract(req, res);
     if (url.pathname === '/api/log' && req.method === 'POST') {
       const { lines } = JSON.parse(await readBody(req));
