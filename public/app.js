@@ -9,8 +9,10 @@ const KRW_PER_USD = 1400;
 const IDLE_MS = 1300;          // 이 시간 동안 새 글자가 없으면 문장 종료로 보고 확정 처리
 const SPLIT_TR_CHARS = 70;     // 쉬지 않고 말할 때 번역문이 이만큼 쌓이면 문장 끝에서 나눔
 const SPLIT_FORCE_CHARS = 220; // 원문에 문장 끝이 없어도 번역문이 이만큼 길어지면 나눔
-const STALL_MS = 20000;        // 번역은 계속 나오는데 원문 인식이 이 시간 동안 없으면 연결을 새로 연다
-const STALL_OUT_DELTAS = 40;
+// 번역은 계속 나오는데 원문 인식이 이 시간 동안 없으면 연결을 새로 연다.
+// 한국어 발언 중에도 원문이 없으므로 짧게 잡으면 한국어로 길게 말할 때마다 끊는다 (10/28: 20초 → 45초)
+const STALL_MS = 45000;
+const STALL_OUT_DELTAS = 120;
 const STALL_COOLDOWN_MS = 90000;
 const NEW_MEETING_GAP_MS = 2 * 3600 * 1000; // 기록 사이 간격이 이보다 크면 다른 회의로 본다
 const HISTORY_FOR_CONTEXT = 12;
@@ -188,9 +190,9 @@ function renderItem(it) {
     el.className = 'card me';
     el.innerHTML = `<div class="meta">${time}<span class="badge me">내 답변</span></div><div class="src">${esc(it.src)}</div><div class="tr">${esc(it.tr || '')}</div>`;
   } else {
-    const badge = { interim: '임시', refining: '보정 중', final: '확정', failed: '임시 · 보정 실패', nosrc: '원문 미인식 · 참고용' }[it.status];
+    const badge = { interim: '임시', refining: '보정 중', final: '확정', failed: '임시 · 보정 실패', nosrc: '한국어 발언 추정 · 원문 없음' }[it.status];
     el.className = 'card en' + (it.status === 'final' ? '' : ' interim') + (it.status === 'nosrc' ? ' nosrc' : '');
-    el.innerHTML = `<div class="meta">${time}<span class="badge ${it.status}">${badge}</span></div><div class="src">${esc(it.src || (it.status === 'refining' ? '(원문 기다리는 중)' : '(원문 인식 안 됨)'))}</div><div class="tr">${esc(it.tr || '…')}</div>`;
+    el.innerHTML = `<div class="meta">${time}<span class="badge ${it.status}">${badge}</span></div><div class="src">${esc(it.src || (it.status === 'refining' ? '(원문 기다리는 중)' : '(영어 원문 없음)'))}</div><div class="tr">${esc(it.tr || '…')}</div>`;
   }
   persistItems();
   return el;
@@ -258,7 +260,8 @@ function finalizeSeg() {
     S.items.push(it); renderItem(it); scrollBottom(wasBottom);
     return;
   }
-  // 원문이 없으면 실시간 번역은 잡음에서 지어낸 문장일 수 있다 → 보정·확정하지 않고 참고용으로만 남긴다
+  // 원문이 없으면 대부분 한국어 발언이다 (번역 세션은 한국어 음성의 원문을 주지 않고 한국어 문장만 낸다, 10/28 테스트로 확인).
+  // 영어 원문이 늦게 오면 flushLate가 영어 카드로 바꾼다. 그 전까지는 보정·확정하지 않는다.
   const it = { id: ++S.seq, lang: 'en', src: s, tr: t, draft: t, status: s ? 'interim' : 'nosrc', at: new Date() };
   it.history = recentHistory();
   S.items.push(it); renderItem(it); scrollBottom(wasBottom);
@@ -277,7 +280,7 @@ function pendingNosrc() {
   const out = [];
   for (let i = S.items.length - 1; i >= 0; i--) {
     const it = S.items[i];
-    if (it.lang !== 'en' || it.status !== 'nosrc' || Date.now() - it.at.getTime() > LATE_GROUP_MS) break;
+    if (it.lang !== 'en' || it.status !== 'nosrc' || Date.now() - it.at.getTime() > LATE_GROUP_MS || it.at.getTime() < (S.lateCutoff || 0)) break;
     out.unshift(it);
   }
   return out;
@@ -313,7 +316,7 @@ function flushLate() {
 const LATE_SRC_MS = 4000, LATE_SRC_NOSRC_MS = 10000;
 function attachLateSrc(delta) {
   const it = S.lastEn;
-  if (!it || /[가-힣]/.test(delta)) return false;
+  if (!it || /[가-힣]/.test(delta) || it.at.getTime() < (S.lateCutoff || 0)) return false;
   const age = Date.now() - it.at.getTime();
   if (age > (it.src ? LATE_SRC_MS : LATE_SRC_NOSRC_MS)) return false;
   it.src = (it.src + delta).replace(/^\s+/, '');
@@ -619,6 +622,8 @@ async function disconnect() {
 function scheduleReconnect(reason) {
   if (S.userStopped || S.state === 'paused') return;
   if (S.reconnectTimer && S.state === 'reconnecting') return;
+  // 새 세션의 원문은 끊기기 전 미인식 카드와 다른 발언이다 (10/28 테스트: 재연결 뒤 'before' 한 단어가 카드 4개에 붙음)
+  flushLate(); S.lateCutoff = Date.now();
   disconnect();
   S.state = 'reconnecting';
   S.reconnectTries++;
@@ -778,7 +783,8 @@ function transcriptLines() {
     const t = hhmm(it.at);
     if (it.lang === 'ko') lines.push(`[${t}] (한국어) ${it.src}`);
     else if (it.lang === 'me') lines.push(`[${t}] (내 답변) ${it.src}\n         → ${it.tr}`);
-    else lines.push(`[${t}] EN: ${it.src || '(원문 미인식)'}\n         KO: ${it.tr}${it.status === 'final' ? '' : it.status === 'nosrc' ? ' (원문 미인식 · 참고용)' : ' (임시)'}`);
+    else if (!it.src) lines.push(`[${t}] KO(추정): ${it.tr} (한국어 발언 추정 · 영어 원문 없음)`);
+    else lines.push(`[${t}] EN: ${it.src}\n         KO: ${it.tr}${it.status === 'final' ? '' : ' (임시)'}`);
   }
   lines.push('', `사용 시간 ${els.elapsed.textContent} · 예상 비용 ${els.cost.textContent} (${els.costKrw.textContent})`);
   return lines;
@@ -889,7 +895,7 @@ $('btnMinutes').onclick = async () => {
   const items = currentMeetingItems();
   if (!items.length) { toast('아직 통역 기록이 없습니다.', true); return; }
   const nosrc = items.filter(i => i.lang === 'en' && !i.src).length;
-  if (nosrc && nosrc / items.length > 0.3) toast(`원문 미인식 기록이 ${nosrc}건으로 많습니다. 회의록 내용을 꼭 검토하세요.`, true, 8000);
+  if (nosrc && nosrc / items.length > 0.3) toast(`영어 원문 없는 기록(한국어 발언 추정)이 ${nosrc}건입니다. 회의록 내용을 꼭 검토하세요.`, true, 8000);
   const btn = $('btnMinutes'); btn.disabled = true; btn.textContent = '회의록 작성 중...';
   toast('회의록을 작성하고 있습니다 (30초~1분 정도 걸립니다)', false, 60000);
   try {

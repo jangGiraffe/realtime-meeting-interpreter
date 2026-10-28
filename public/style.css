@@ -67,8 +67,8 @@ input:focus, textarea:focus, select:focus { outline: 2px solid rgba(79,140,255,.
 .badge.refining { color: var(--accent); border-color: rgba(79,140,255,.5); }
 .badge.final { color: var(--ok); border-color: rgba(47,191,113,.5); }
 .badge.failed { color: var(--bad); border-color: rgba(229,83,75,.5); }
-.badge.nosrc { color: var(--bad); border-color: rgba(229,83,75,.5); }
-.card.nosrc .tr { opacity: .55; font-style: italic; }
+.badge.nosrc { color: var(--muted); border-color: var(--line); }
+.card.nosrc .tr { opacity: .8; }
 .badge.live { color: #9fc0ff; border-color: rgba(79,140,255,.5); animation: blink 1.4s infinite; }
 .badge.ko { color: var(--dim); border-color: var(--line); }
 .badge.me { color: #9fc0ff; border-color: rgba(79,140,255,.4); }
