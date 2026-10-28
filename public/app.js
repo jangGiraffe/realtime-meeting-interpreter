@@ -29,6 +29,8 @@ const S = {
   state: 'idle',              // idle | connecting | live | paused | reconnecting
   userStopped: true, reconnectTries: 0, reconnectTimer: null,
   seg: newSeg(), items: [], seq: 0,
+  late: newLate(),            // 원문 미인식 카드 뒤에 늦게 몰려온 원문
+
   liveSeconds: 0, textUsd: 0, textModel: 'gpt-4.1-mini',
   lastTick: performance.now(),
 };
@@ -265,6 +267,47 @@ function finalizeSeg() {
   if ($('optRefine').checked) { it.status = 'refining'; renderItem(it); it.timer = setTimeout(() => refine(it), 300); }
   else if (!t) { it.tr = '(번역 없음)'; renderItem(it); }
 }
+// 원문 스트림은 번역보다 늦게, 몰아서 오는 경우가 많다 (10/28: 미인식 카드 뒤 확정 카드에 앞 문장들 원문이 뭉쳐 붙음).
+// 미인식 카드가 남아 있는 동안 들어온 원문은 따로 모았다가, 원문이 잠잠해지면 미인식 카드들을 한 카드로 합쳐 붙이고 다시 보정한다.
+const LATE_GROUP_MS = 30000; // 이보다 오래된 미인식 카드에는 붙이지 않는다
+const LATE_FLUSH_MS = 1500;  // 원문이 이만큼 안 들어오면 모은 원문을 붙인다
+const LATE_MAX_MS = 25000;   // 계속 말해도 이 시간이 지나면 붙인다
+function newLate() { return { src: '', last: 0, at: 0 }; }
+function pendingNosrc() {
+  const out = [];
+  for (let i = S.items.length - 1; i >= 0; i--) {
+    const it = S.items[i];
+    if (it.lang !== 'en' || it.status !== 'nosrc' || Date.now() - it.at.getTime() > LATE_GROUP_MS) break;
+    out.unshift(it);
+  }
+  return out;
+}
+function addLateSrc(delta) {
+  if (!S.late.src) S.late.at = performance.now();
+  S.late.src += delta; S.late.last = performance.now();
+  const first = pendingNosrc()[0];
+  const el = first && document.getElementById('it' + first.id);
+  if (el) el.querySelector('.src').textContent = S.late.src.trim();
+}
+function flushLate() {
+  const src = S.late.src.trim();
+  S.late = newLate();
+  if (!src) return;
+  const group = pendingNosrc();
+  if (!group.length) { S.seg.src = (src + ' ' + S.seg.src).trim(); S.seg.last = performance.now(); renderLive(); return; }
+  const [first, ...rest] = group;
+  first.tr = first.draft = group.map(i => i.tr).filter(Boolean).join(' ');
+  first.src = src; first.status = 'interim';
+  if (rest.length) {
+    const ids = new Set(rest.map(i => i.id));
+    S.items = S.items.filter(i => !ids.has(i.id));
+    rest.forEach(i => { const el = document.getElementById('it' + i.id); if (el) el.remove(); });
+  }
+  S.lastEn = first;
+  dlog(`늦은 원문 ${src.length}자 → 미인식 카드 ${group.length}개를 묶어 보정`);
+  renderItem(first);
+  if ($('optRefine').checked) refine(first);
+}
 // 문장 확정 뒤에 늦게 도착한 원문 → 직전 카드에 붙이고 다시 보정
 // 한국어 발언이나 시간이 지난 원문은 다른 문장이므로 붙이지 않는다 (원문·번역 짝이 어긋나는 원인)
 const LATE_SRC_MS = 4000, LATE_SRC_NOSRC_MS = 10000;
@@ -303,6 +346,7 @@ function handleEvent(ev) {
   switch (ev.type) {
     case 'session.input_transcript.delta':
       S.lastInAt = performance.now(); S.outSinceIn = 0;
+      if (!S.seg.src && !/[가-힣]/.test(ev.delta || '') && (S.late.src || pendingNosrc().length)) { addLateSrc(ev.delta || ''); break; }
       if (!S.seg.src && !S.seg.tr && attachLateSrc(ev.delta || '')) break;
       S.seg.src += ev.delta || ''; S.seg.last = performance.now(); renderLive(); break;
     case 'session.output_transcript.delta':
@@ -328,6 +372,7 @@ function tick() {
     if (now - last > IDLE_MS) finalizeSeg();
     else splitLongSeg();
   }
+  if (S.late.src && ((!S.seg.tr && now - S.late.last > LATE_FLUSH_MS) || now - S.late.at > LATE_MAX_MS)) flushLate();
   // 원문 인식 스트림만 멈추는 경우가 있다 (10/28 회의: 원문 미인식 81건). 감지하면 세션을 새로 연다.
   if (S.state === 'live' && (S.outSinceIn || 0) >= STALL_OUT_DELTAS && now - (S.lastInAt || now) > STALL_MS
       && now - (S.lastStallFix || 0) > STALL_COOLDOWN_MS) {
@@ -650,14 +695,14 @@ els.btnStart.onclick = async () => {
   await connect();
 };
 els.btnPause.onclick = async () => {
-  S.state = 'paused'; finalizeSeg();
+  S.state = 'paused'; finalizeSeg(); flushLate();
   await disconnect(); closeAudio();
   const ko = fileMode() ? false : startKoRec();
   setStatus('paused', ko ? '일시정지 · 한국어만 기록 중 (무료)' : '일시정지 (과금 안 됨)'); updateButtons();
 };
 els.btnStop.onclick = async () => {
   S.userStopped = true; clearTimeout(S.reconnectTimer); S.reconnectTimer = null;
-  stopKoRec(); finalizeSeg();
+  stopKoRec(); finalizeSeg(); flushLate();
   await disconnect(); closeAudio();
   S.state = 'idle'; setStatus('', '종료됨'); updateButtons();
   toast(`통역 종료 · 사용 ${els.elapsed.textContent} · 예상 ${els.cost.textContent} (${els.costKrw.textContent})`, false, 8000);
@@ -764,7 +809,7 @@ $('btnNewOk').onclick = async () => {
     // 1) 진행 중인 통역 종료
     if (S.state !== 'idle') {
       S.userStopped = true; clearTimeout(S.reconnectTimer); S.reconnectTimer = null;
-      stopKoRec(); finalizeSeg();
+      stopKoRec(); finalizeSeg(); flushLate();
       await disconnect(); closeAudio();
       S.state = 'idle'; setStatus('', '대기'); updateButtons();
     }
