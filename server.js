@@ -26,6 +26,7 @@ const apiKey = () => cfg('OPENAI_API_KEY', '');
 const PORT = Number(cfg('PORT', 3000));
 const REALTIME_MODEL = () => cfg('REALTIME_MODEL', 'gpt-realtime-translate');
 const TRANSCRIBE_MODEL = () => cfg('TRANSCRIBE_MODEL', 'gpt-realtime-whisper');
+const STT_MODEL = () => cfg('STT_MODEL', 'gpt-live-transcribe'); // 원문 받아쓰기 전용 (STT_MODEL=off 이면 사용 안 함)
 const TEXT_MODEL = () => cfg('TEXT_MODEL', 'gpt-4.1-mini');
 const OPENAI = cfg('OPENAI_BASE_URL', 'https://api.openai.com/v1');
 
@@ -96,6 +97,30 @@ async function rtcConnect(req, res) {
   send(res, 200, { sdp: answer });
 }
 
+// 1-2) 원문 받아쓰기 전용 세션: 번역 세션의 원문은 자주 빠지므로 (10/28 테스트: 영어 발언 1분 넘게 원문 없음) 같은 소리를 따로 받아쓴다
+async function sttConnect(req, res) {
+  const { sdp, noise = 'near_field', keywords = [] } = JSON.parse(await readBody(req));
+  const transcription = { model: STT_MODEL(), languages: ['en', 'ko'] };
+  // keywords: 한 줄, '<' '>' 없이 (API 제약)
+  const kw = (Array.isArray(keywords) ? keywords : []).map(k => String(k).replace(/[<>\r\n]/g, ' ').trim()).filter(Boolean).slice(0, 50);
+  if (kw.length) transcription.keywords = kw;
+  const input = { transcription, turn_detection: null };
+  if (noise === 'near_field' || noise === 'far_field') input.noise_reduction = { type: noise };
+  slog(`받아쓰기 세션 요청: model=${transcription.model}, keywords=${kw.length}개`);
+  const secret = await openaiJSON(`${OPENAI}/realtime/client_secrets`, { session: { type: 'transcription', audio: { input } } });
+  const ek = secret.value || (secret.client_secret && secret.client_secret.value);
+  if (!ek) throw new Error('받아쓰기 임시 키 응답 형식을 알 수 없습니다: ' + JSON.stringify(secret).slice(0, 200));
+  const r = await fetch(`${OPENAI}/realtime/calls`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${ek}`, 'Content-Type': 'application/sdp' },
+    body: sdp,
+  });
+  const answer = await r.text();
+  slog(`받아쓰기 calls 응답 ${r.status}, SDP ${answer.length}자`);
+  if (!r.ok) throw new Error(`받아쓰기 연결 실패 ${r.status}: ${answer.slice(0, 300)}`);
+  send(res, 200, { sdp: answer, model: transcription.model });
+}
+
 // 2) 텍스트 번역: refine(영→한 자막 보정), reply(한→영 답변)
 function contextBlock(ctx = {}, history = []) {
   const parts = [];
@@ -129,7 +154,7 @@ async function translate(req, res) {
     system = `당신은 비즈니스 화상회의에서 사용자의 한국어 답변을 영어로 옮기는 통역사다. 회의 문맥에 맞는 자연스럽고 정중한 비즈니스 영어로, 회의 중 그대로 말하거나 채팅에 붙여 넣을 수 있게 번역한다.\n${RULES}`;
     user = `${contextBlock(context, history)}\n\n[번역할 나의 한국어 답변]\n${text}`;
   } else {
-    system = `당신은 영어 회의 발언을 한국어 자막으로 옮기는 전문 통역사다. 실시간 엔진의 임시 번역이 함께 주어진다. 영어 원문과 회의 문맥을 기준으로 오역·용어·고유명사만 바로잡아 자연스러운 한국어 자막 한두 문장으로 출력한다. 원문이 잘려 있으면 잘린 만큼만 번역한다. 원문 인식이 없다고 표시되면 임시 번역의 띄어쓰기, 용어집·참석자 이름 표기만 바로잡고 의미는 바꾸지 않는다.\n${RULES}`;
+    system = `당신은 영어 회의 발언을 한국어 자막으로 옮기는 전문 통역사다. 실시간 엔진의 임시 번역이 함께 주어진다. 영어 원문과 회의 문맥을 기준으로 오역·용어·고유명사만 바로잡아 자연스러운 한국어 자막 한두 문장으로 출력한다. 원문이 잘려 있으면 잘린 만큼만 번역한다. 임시 번역은 원문과 시점이 어긋나 앞뒤 문장이 섞여 있을 수 있으니, 원문에 없는 내용은 임시 번역에 있어도 넣지 않는다. 원문 인식이 없다고 표시되면 임시 번역의 띄어쓰기, 용어집·참석자 이름 표기만 바로잡고 의미는 바꾸지 않는다.\n${RULES}`;
     user = `${contextBlock(context, history)}\n\n[영어 원문 (음성 인식, 오류 가능)]\n${text}\n\n[실시간 임시 번역]\n${draft || '(없음)'}`;
   }
   const data = await openaiJSON(`${OPENAI}/chat/completions`, {
@@ -368,6 +393,10 @@ async function handle(req, res) {
     }
     if (url.pathname.startsWith('/api/') && !apiKey()) return send(res, 401, { error: 'OpenAI API 키가 설정되지 않았습니다.' });
     if (url.pathname === '/api/rtc' && req.method === 'POST') return await rtcConnect(req, res);
+    if (url.pathname === '/api/stt' && req.method === 'POST') {
+      if (STT_MODEL() === 'off') return send(res, 404, { error: '받아쓰기 세션 꺼짐 (STT_MODEL=off)' });
+      return await sttConnect(req, res);
+    }
     if (url.pathname === '/api/translate' && req.method === 'POST') return await translate(req, res);
     if (url.pathname === '/api/digest' && req.method === 'POST') return await digest(req, res);
     if (url.pathname === '/api/minutes' && req.method === 'POST') return await makeMinutes(req, res);

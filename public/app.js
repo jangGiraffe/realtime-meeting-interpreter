@@ -14,6 +14,14 @@ const SPLIT_FORCE_CHARS = 220; // 원문에 문장 끝이 없어도 번역문이
 const STALL_MS = 45000;
 const STALL_OUT_DELTAS = 120;
 const STALL_COOLDOWN_MS = 90000;
+// 원문 받아쓰기 세션을 쓸 때: 원문 기준으로 문장을 확정한다. 번역은 원문보다 늦게 오므로 잠깐 기다린다.
+// 받아쓰기는 단어 단위로 오고 말하는 중간에 2~3초씩 쉬기도 한다 (10/28 테스트) → 문장 부호로 끝났을 때만 빨리 확정한다
+const SENT_IDLE_MS = 800;      // 원문이 문장 부호로 끝나고 이만큼 멈추면 확정
+const PAUSE_IDLE_MS = 3500;    // 문장 부호 없이 이만큼 멈추면 확정
+const TR_SETTLE_MS = 900;      // 원문이 멈춘 뒤 번역도 이만큼 멈추면 확정
+const SRC_WAIT_MAX_MS = 5000;  // 번역이 계속 나와도 원문이 이만큼 멈추면 확정
+const NOSRC_IDLE_MS = 4000;    // 번역만 있고 원문이 없으면 이만큼 기다린 뒤 원문 없음으로 확정
+const TAIL_ATTACH_MS = 8000;   // 확정 뒤 늦게 나온 번역 꼬리는 이 시간 안의 직전 카드에 붙인다
 const NEW_MEETING_GAP_MS = 2 * 3600 * 1000; // 기록 사이 간격이 이보다 크면 다른 회의로 본다
 const HISTORY_FOR_CONTEXT = 12;
 
@@ -32,11 +40,11 @@ const S = {
   userStopped: true, reconnectTries: 0, reconnectTimer: null,
   seg: newSeg(), items: [], seq: 0,
   late: newLate(),            // 원문 미인식 카드 뒤에 늦게 몰려온 원문
-
+  stt: { pc: null, dc: null, live: false, off: false, tries: 0, timer: null }, // 원문 받아쓰기 전용 세션
   liveSeconds: 0, textUsd: 0, textModel: 'gpt-4.1-mini',
   lastTick: performance.now(),
 };
-function newSeg() { return { src: '', tr: '', last: 0 }; }
+function newSeg() { return { src: '', tr: '', last: 0, lastSrc: 0, lastTr: 0 }; }
 
 // ===== 진단 로그 (프로그램 폴더의 debug.log 로 저장) =====
 const DBG = { buf: [], counts: {}, raw: 0, dirty: false, peak: 0 };
@@ -254,6 +262,18 @@ function finalizeSeg() {
   const s = src.trim(), t = tr.trim();
   if (!s && !t) return;
   const wasBottom = nearBottom();
+  // 받아쓰기 세션 사용 중: 원문 없이 남은 번역은 대부분 직전 문장 번역의 늦은 꼬리다 → 직전 카드 초안에 붙인다
+  if (S.stt.live && !s && t) {
+    const last = S.items[S.items.length - 1];
+    if (last && Date.now() - last.at.getTime() < TAIL_ATTACH_MS) {
+      if (last.lang === 'en' && last.src && last.status !== 'final') {
+        last.draft = ((last.draft || '') + ' ' + t).trim();
+        if (last.status !== 'refining') last.tr = last.draft;
+        renderItem(last); scrollBottom(wasBottom);
+      }
+      return; // 한국어 발언 뒤의 꼬리(한국어 반복)나 이미 확정된 카드의 꼬리는 버린다
+    }
+  }
   // 한국어 발언 판정: 원문 인식 결과 기준 (인식이 없으면 번역문으로는 판단하지 않음)
   if (s && isKorean(s)) {
     const it = { id: ++S.seq, lang: 'ko', src: s, at: new Date() };
@@ -357,13 +377,17 @@ async function refine(it) {
 function handleEvent(ev) {
   switch (ev.type) {
     case 'session.input_transcript.delta':
+      // 받아쓰기 세션이 살아 있으면 원문은 그쪽에서만 받는다 (번역 세션의 원문은 자주 빠진다)
+      if (S.stt.live !== !!ev._stt) break;
       S.lastInAt = performance.now(); S.outSinceIn = 0;
-      if (!S.seg.src && !/[가-힣]/.test(ev.delta || '') && (S.late.src || pendingNosrc().length)) { addLateSrc(ev.delta || ''); break; }
-      if (!S.seg.src && !S.seg.tr && attachLateSrc(ev.delta || '')) break;
-      S.seg.src += ev.delta || ''; S.seg.last = performance.now(); renderLive(); break;
+      if (!S.stt.live) {
+        if (!S.seg.src && !/[가-힣]/.test(ev.delta || '') && (S.late.src || pendingNosrc().length)) { addLateSrc(ev.delta || ''); break; }
+        if (!S.seg.src && !S.seg.tr && attachLateSrc(ev.delta || '')) break;
+      }
+      S.seg.src += ev.delta || ''; S.seg.last = S.seg.lastSrc = performance.now(); renderLive(); break;
     case 'session.output_transcript.delta':
       S.outSinceIn = (S.outSinceIn || 0) + 1;
-      S.seg.tr += ev.delta || ''; S.seg.last = performance.now(); renderLive(); break;
+      S.seg.tr += ev.delta || ''; S.seg.last = S.seg.lastTr = performance.now(); renderLive(); break;
     case 'session.created': case 'session.updated':
       break;
     case 'session.closed':
@@ -381,12 +405,18 @@ function tick() {
   renderCost();
   const { src, tr, last } = S.seg;
   if ((src || tr) && last) {
-    if (now - last > IDLE_MS) finalizeSeg();
+    let done;
+    if (S.stt.live) {
+      const srcIdle = now - S.seg.lastSrc, trIdle = now - S.seg.lastTr;
+      const ended = /[.?!。]["'”’)]?\s*$/.test(src);
+      done = src ? srcIdle > (ended ? SENT_IDLE_MS : PAUSE_IDLE_MS) && (trIdle > TR_SETTLE_MS || srcIdle > SRC_WAIT_MAX_MS) : trIdle > NOSRC_IDLE_MS;
+    } else done = now - last > IDLE_MS;
+    if (done) finalizeSeg();
     else splitLongSeg();
   }
   if (S.late.src && ((!S.seg.tr && now - S.late.last > LATE_FLUSH_MS) || now - S.late.at > LATE_MAX_MS)) flushLate();
   // 원문 인식 스트림만 멈추는 경우가 있다 (10/28 회의: 원문 미인식 81건). 감지하면 세션을 새로 연다.
-  if (S.state === 'live' && (S.outSinceIn || 0) >= STALL_OUT_DELTAS && now - (S.lastInAt || now) > STALL_MS
+  if (S.state === 'live' && !S.stt.live && (S.outSinceIn || 0) >= STALL_OUT_DELTAS && now - (S.lastInAt || now) > STALL_MS
       && now - (S.lastStallFix || 0) > STALL_COOLDOWN_MS) {
     S.lastStallFix = now;
     dlog(`원문 인식 정지 감지: 번역 ${S.outSinceIn}건 동안 원문 없음 → 재연결`);
@@ -539,6 +569,8 @@ async function reshareDisplay(muted) {
   toast(muted ? '노트북 소리 꺼짐 (통역에만 씀)' : '노트북 소리 켜짐');
 }
 function closeAudio() {
+  // 받아쓰기 세션은 송신 트랙에 묶여 있으므로 소리를 닫을 때 같이 닫는다
+  clearTimeout(S.stt.timer); S.stt.timer = null; disconnectStt();
   if (FileSrc.file) { try { $('fileAudio').pause(); } catch {} }
   if (S.stream) S.stream.getTracks().forEach(t => t.stop());
   if (S.dispStream) { S.dispStream.getAudioTracks().forEach(t => { t.onended = null; }); S.dispStream.getTracks().forEach(t => t.stop()); }
@@ -557,6 +589,63 @@ $('srcSelect').onchange = () => {
   if (S.state === 'live') toast('소리 입력 방식은 일시정지 후 다시 시작하면 적용됩니다');
 };
 
+// ===== 원문 받아쓰기 전용 세션 =====
+// 같은 송신 트랙을 별도 받아쓰기 세션에도 보낸다. 실패하면 번역 세션의 원문으로 돌아간다.
+function sttKeywords() {
+  const c = getCtx();
+  const terms = (c.glossary || '').split(/\r?\n/).map(l => l.split('=')[0].trim());
+  const names = (c.participants || '').split(/[,\n]/).map(s => s.replace(/\(.*?\)/g, '').trim());
+  return [...terms, ...names].filter(s => s && s.length <= 60);
+}
+function handleSttEvent(ev) {
+  DBG.counts['stt:' + ev.type] = (DBG.counts['stt:' + ev.type] || 0) + 1; DBG.dirty = true;
+  if (ev.type === 'conversation.item.input_audio_transcription.delta') handleEvent({ type: 'session.input_transcript.delta', delta: ev.delta || '', _stt: true });
+  else if (ev.type === 'conversation.item.input_audio_transcription.completed') { if (S.seg.src && !/\s$/.test(S.seg.src)) S.seg.src += ' '; }
+  else if (ev.type === 'error') dlog('받아쓰기 오류: ' + JSON.stringify(ev.error || ev).slice(0, 300));
+}
+async function connectStt() {
+  if (!S.sendTrack || S.stt.off || S.stt.pc) return;
+  const pc = new RTCPeerConnection();
+  S.stt.pc = pc;
+  const lost = why => {
+    if (S.stt.pc !== pc) return;
+    dlog('받아쓰기 끊김: ' + why);
+    disconnectStt(); retryStt();
+  };
+  try {
+    pc.addTrack(S.sendTrack);
+    const dc = pc.createDataChannel('oai-events');
+    S.stt.dc = dc;
+    dc.onmessage = e => { try { handleSttEvent(JSON.parse(e.data)); } catch (err) { dlog('받아쓰기 수신 처리 오류: ' + err.message); } };
+    dc.onopen = () => { if (S.stt.pc !== pc) return; S.stt.live = true; S.stt.tries = 0; dlog('받아쓰기 연결됨: ' + (S.stt.model || '')); };
+    dc.onclose = () => lost('채널 닫힘');
+    pc.onconnectionstatechange = () => { if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) lost(pc.connectionState); };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const noise = $('srcSelect').value === 'mic' ? $('optNoise').value : 'near_field';
+    const { sdp, model } = await api('/api/stt', { sdp: offer.sdp, noise, keywords: sttKeywords() });
+    if (S.stt.pc !== pc) return;
+    S.stt.model = model;
+    await pc.setRemoteDescription({ type: 'answer', sdp });
+  } catch (e) {
+    dlog('받아쓰기 연결 실패: ' + e.message);
+    if (S.stt.pc !== pc) return;
+    disconnectStt();
+    if (/꺼짐/.test(e.message)) { S.stt.off = true; return; }
+    retryStt();
+  }
+}
+function retryStt() {
+  if (S.userStopped || S.state === 'paused' || S.stt.timer) return;
+  if (++S.stt.tries > 5) { toast('원문 받아쓰기에 연결하지 못해 번역 세션의 원문을 씁니다 (원문이 빠질 수 있음).', true, 7000); return; }
+  S.stt.timer = setTimeout(() => { S.stt.timer = null; connectStt(); }, 2000 * S.stt.tries);
+}
+function disconnectStt() {
+  const pc = S.stt.pc;
+  S.stt.pc = null; S.stt.dc = null; S.stt.live = false;
+  if (pc) { try { pc.close(); } catch {} }
+}
+
 // ===== WebRTC 연결 =====
 async function connect() {
   stopKoRec();
@@ -566,6 +655,7 @@ async function connect() {
   updateButtons();
   try {
     if (!S.sendTrack) await openAudio();
+    connectStt();
     const pc = new RTCPeerConnection();
     S.pc = pc;
     pc.addTrack(S.sendTrack);
@@ -704,7 +794,7 @@ els.btnStart.onclick = async () => {
       && confirm(`이전 회의 기록 ${S.items.length}건이 남아 있습니다 (마지막 ${lastItem.at.toLocaleString('ko-KR')}).\n지우고 새 회의를 시작할까요? (취소 = 기록 유지)`)) {
     S.items = []; els.history.innerHTML = ''; store('items', '[]');
   }
-  S.userStopped = false; S.reconnectTries = 0;
+  S.userStopped = false; S.reconnectTries = 0; S.stt.tries = 0; S.stt.off = false;
   els.empty.classList.add('hidden');
   await connect();
 };
